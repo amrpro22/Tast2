@@ -1,0 +1,661 @@
+<!DOCTYPE html>  
+<html lang="ar" dir="rtl">  
+<head>  
+    <meta charset="UTF-8">  
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">  
+    <title>صندوق الحالات الطارئة - نظام السنوات المالية</title>  
+      
+    <!-- Tailwind CSS -->  
+    <script src="https://cdn.tailwindcss.com"></script>  
+      
+    <!-- React & Babel -->  
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>  
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>  
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>  
+  
+    <!-- Firebase SDK (Version 8) -->  
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>  
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>  
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>  
+  
+    <!-- PDF Libraries -->  
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>  
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>  
+  
+    <style>  
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');  
+          
+        body {   
+            font-family: 'IBM Plex Sans Arabic', sans-serif;  
+            background-color: #f1f5f9;  
+            margin: 0;  
+            padding: 0;  
+            -webkit-tap-highlight-color: transparent;  
+        }  
+  
+        .header-gradient {  
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);  
+            position: sticky;  
+            top: 0;  
+            z-index: 40;  
+        }  
+  
+        .app-container {  
+            max-width: 480px;   
+            margin: 0 auto;  
+            min-height: 100vh;  
+            background: #f8fafc;  
+            position: relative;  
+        }  
+  
+        .currency-card-sar { border-top: 4px solid #10b981; background: #ecfdf5; }  
+        .currency-card-usd { border-top: 4px solid #3b82f6; background: #eff6ff; }  
+        .currency-card-yer { border-top: 4px solid #f59e0b; background: #fffbeb; }  
+  
+        .timeline-track {  
+            height: 8px;  
+            background: #e2e8f0;  
+            border-radius: 10px;  
+            overflow: hidden;  
+        }  
+  
+        .timeline-fill {  
+            height: 100%;  
+            transition: width 0.5s ease-in-out;  
+        }  
+  
+        .filter-active {  
+            background-color: #0f172a !important;  
+            color: white !important;  
+        }  
+  
+        /* حاوية التصدير المخفية */  
+        #pdf-export-container {  
+            position: fixed;  
+            left: -9999px;  
+            top: 0;  
+            width: 800px;   
+            background: white;  
+            direction: rtl;  
+            padding: 40px;  
+        }  
+    </style>  
+</head>  
+<body>  
+    <div id="root"></div>  
+  
+    <script type="text/babel">  
+        const { useState, useEffect, useMemo, useCallback } = React;  
+  
+        const firebaseConfig = {  
+            apiKey: "AIzaSyBupAOs6diz9ET8lGnMdyKjS_cMS8sA2Uc",  
+            authDomain: "amr4admin.firebaseapp.com",  
+            projectId: "amr4admin",  
+            storageBucket: "amr4admin.firebasestorage.app",  
+            messagingSenderId: "177280788092",  
+            appId: "1:177280788092:web:44f16c8f585a5b3e484bf9"  
+        };  
+  
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);  
+        const db = firebase.firestore();  
+        const auth = firebase.auth();  
+        const APP_PATH = "amr4admin";  
+  
+        // دوال مساعدة للسنة المالية  
+        const getFinancialYearId = (date = new Date()) => {  
+            const year = date.getFullYear();  
+            const month = date.getMonth();  
+            // السنة المالية تبدأ من 1 يونيو (month 5)  
+            if (month >= 5) { // يونيو وما بعده  
+                return `${year}-${year + 1}`;  
+            } else {  
+                return `${year - 1}-${year}`;  
+            }  
+        };  
+  
+        const getFinancialYearStart = (yearId) => {  
+            const [startYear] = yearId.split('-');  
+            return new Date(parseInt(startYear), 5, 1); // 1 يونيو  
+        };  
+  
+        const getFinancialYearEnd = (yearId) => {  
+            const [startYear] = yearId.split('-');  
+            return new Date(parseInt(startYear) + 1, 4, 31); // 31 مايو  
+        };  
+  
+        const isYearClosed = async (yearId) => {  
+            const closedRef = db.collection('financialYears').doc(yearId).collection('meta').doc('status');  
+            const doc = await closedRef.get();  
+            return doc.exists && doc.data().closed === true;  
+        };  
+  
+        const App = () => {  
+            const [donors, setDonors] = useState([]);  
+            const [user, setUser] = useState(null);  
+            const [filter, setFilter] = useState('all');  
+            const [isModalOpen, setIsModalOpen] = useState(false);  
+            const [editId, setEditId] = useState(null);  
+            const [isPdfLoading, setIsPdfLoading] = useState(false);  
+            const [searchTerm, setSearchTerm] = useState('');  
+            const [currentYearId, setCurrentYearId] = useState(null);  
+            const [showArchivedYears, setShowArchivedYears] = useState(false);  
+            const [archivedYears, setArchivedYears] = useState([]);  
+            const [selectedArchivedYear, setSelectedArchivedYear] = useState(null);  
+            const [archivedDonors, setArchivedDonors] = useState([]);  
+            const [yearStatus, setYearStatus] = useState({ isClosed: false, endDate: null });  
+  
+            const [form, setForm] = useState({   
+                name: '',   
+                totalAmount: '',   
+                paidAmount: '',   
+                currency: 'sar',   
+                duration: 'none',   
+                isPaidStatus: false   
+            });  
+  
+            // تهيئة السنة المالية والتحقق من الإغلاق  
+            useEffect(() => {  
+                const initFinancialYear = async () => {  
+                    const currentYear = getFinancialYearId();  
+                    setCurrentYearId(currentYear);  
+                      
+                    const closed = await isYearClosed(currentYear);  
+                    const endDate = getFinancialYearEnd(currentYear);  
+                    const today = new Date();  
+                      
+                    setYearStatus({  
+                        isClosed: closed,  
+                        endDate: endDate,  
+                        shouldAutoArchive: !closed && today >= endDate  
+                    });  
+  
+                    // إذا انتهت السنة ولم تغلق، قم بإغلاقها تلقائياً  
+                    if (!closed && today >= endDate) {  
+                        await archiveCurrentYear(currentYear);  
+                    }  
+                };  
+                  
+                initFinancialYear();  
+            }, []);  
+  
+            // تحميل المشتركين من السنة الحالية  
+            useEffect(() => {  
+                if (!user || !currentYearId) return;  
+                const ref = db.collection('financialYears').doc(currentYearId).collection('donors');  
+                return ref.onSnapshot(snap => {  
+                    const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));  
+                    setDonors(data);  
+                }, err => console.error("Firestore Error:", err));  
+            }, [user, currentYearId]);  
+  
+            // تحميل السنوات المؤرشفة  
+            useEffect(() => {  
+                if (!user) return;  
+                const loadArchivedYears = async () => {  
+                    const yearsRef = db.collection('financialYears');  
+                    const snapshot = await yearsRef.get();  
+                    const years = [];  
+                    for (const doc of snapshot.docs) {  
+                        const statusDoc = await yearsRef.doc(doc.id).collection('meta').doc('status').get();  
+                        if (statusDoc.exists && statusDoc.data().closed === true) {  
+                            years.push({ id: doc.id, ...statusDoc.data() });  
+                        }  
+                    }  
+                    years.sort((a, b) => b.id.localeCompare(a.id));  
+                    setArchivedYears(years);  
+                };  
+                loadArchivedYears();  
+            }, [user, currentYearId]);  
+  
+            // أرشيف السنة الحالية  
+            const archiveCurrentYear = async (yearId) => {  
+                if (!yearId) yearId = currentYearId;  
+                console.log(`أرشفة السنة: ${yearId}`);  
+                  
+                try {  
+                    // جلب جميع المشتركين  
+                    const donorsRef = db.collection('financialYears').doc(yearId).collection('donors');  
+                    const snapshot = await donorsRef.get();  
+                    const donorsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));  
+                      
+                    // حساب الإجماليات  
+                    const totals = { sar: 0, usd: 0, yer: 0 };  
+                    donorsData.forEach(d => {  
+                        const info = parseInfo(d);  
+                        if (totals[info.curr] !== undefined) totals[info.curr] += info.paid;  
+                    });  
+                      
+                    // حفظ حالة الإغلاق  
+                    const metaRef = db.collection('financialYears').doc(yearId).collection('meta').doc('status');  
+                    await metaRef.set({  
+                        closed: true,  
+                        closedAt: Date.now(),  
+                        totals: totals,  
+                        donorsCount: donorsData.length,  
+                        yearId: yearId  
+                    });  
+                      
+                    // حفظ نسخة من المشتركين في meta  
+                    await metaRef.collection('archive').doc('donors').set({ donors: donorsData });  
+                      
+                    setYearStatus(prev => ({ ...prev, isClosed: true }));  
+                    alert(`تم أرشفة السنة ${yearId} بنجاح`);  
+                      
+                } catch (error) {  
+                    console.error("خطأ في الأرشفة:", error);  
+                    alert("حدث خطأ أثناء أرشفة السنة");  
+                }  
+            };  
+  
+            const parseInfo = (d) => {  
+                const note = d.note || "";  
+                const total = parseFloat((note.match(/T:(\d+(\.\d+)?)/) || [0, 0])[1]);  
+                const paid = parseFloat((note.match(/P:(\d+(\.\d+)?)/) || [0, 0])[1]);  
+                const duration = (note.match(/D:([a-z0-9]+)/) || [0, 'none'])[1];  
+                let curr = 'sar';  
+                if (note.includes('C:USD')) curr = 'usd';  
+                else if (note.includes('C:YER')) curr = 'yer';  
+                  
+                const progress = total > 0 ? Math.min(100, (paid / total) * 100) : 0;  
+                let color = "bg-rose-500";  
+                if (progress >= 100) color = "bg-emerald-500";  
+                else if (progress > 50) color = "bg-blue-500";  
+                else if (progress > 0) color = "bg-amber-500";  
+  
+                return { total, paid, remaining: Math.max(0, total - paid), curr, progress, color, duration };  
+            };  
+  
+            const totals = useMemo(() => {  
+                const sums = { sar: 0, usd: 0, yer: 0 };  
+                donors.forEach(d => {  
+                    const info = parseInfo(d);  
+                    if (sums[info.curr] !== undefined) sums[info.curr] += info.paid;  
+                });  
+                return sums;  
+            }, [donors]);  
+  
+            const filteredList = useMemo(() => {  
+                let list = [...donors].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));  
+                if (searchTerm) list = list.filter(d => d.name.includes(searchTerm));  
+                return list.filter(d => {  
+                    const info = parseInfo(d);  
+                    if (filter === 'paid') return info.progress >= 100;  
+                    if (filter === 'partial') return info.progress > 0 && info.progress < 100;  
+                    if (filter === 'unpaid') return info.progress === 0;  
+                    return true;  
+                });  
+            }, [donors, filter, searchTerm]);  
+  
+            const handleSave = async (e) => {  
+                e.preventDefault();  
+                if (yearStatus.isClosed) {  
+                    alert(`السنة ${currentYearId} مغلقة ولا يمكن إجراء تعديلات. سيتم فتح سنة جديدة قريباً.`);  
+                    return;  
+                }  
+                  
+                const now = Date.now();  
+                const note = `T:${form.totalAmount}|P:${form.paidAmount}|C:${form.currency.toUpperCase()}|D:${form.duration}`;  
+                const ref = db.collection('financialYears').doc(currentYearId).collection('donors');  
+                  
+                const data = {   
+                    name: form.name,   
+                    note: note,   
+                    updatedAt: now   
+                };  
+  
+                if (editId) {  
+                    await ref.doc(editId).update(data);  
+                } else {  
+                    await ref.add({ ...data, createdAt: now });  
+                }  
+                  
+                closeModal();  
+            };  
+  
+            const closeModal = () => {  
+                setIsModalOpen(false);  
+                setEditId(null);  
+                setForm({ name: '', totalAmount: '', paidAmount: '', currency: 'sar', duration: 'none', isPaidStatus: false });  
+            };  
+  
+            // تحميل بيانات سنة مؤرشفة  
+            const loadArchivedYear = async (yearId) => {  
+                setSelectedArchivedYear(yearId);  
+                const metaRef = db.collection('financialYears').doc(yearId).collection('meta').doc('status');  
+                const archiveRef = metaRef.collection('archive').doc('donors');  
+                  
+                const [statusDoc, archiveDoc] = await Promise.all([  
+                    metaRef.get(),  
+                    archiveRef.get()  
+                ]);  
+                  
+                if (archiveDoc.exists) {  
+                    setArchivedDonors(archiveDoc.data().donors || []);  
+                }  
+                setShowArchivedYears(true);  
+            };  
+  
+            // PDF للسنة المؤرشفة  
+            const generateArchivedYearPDF = async (yearId, donorsList, totalsData) => {  
+                setIsPdfLoading(true);  
+                try {  
+                    const element = document.getElementById('pdf-export-container');  
+                      
+                    // تحديث محتوى حاوية PDF للعام المؤرشف  
+                    const container = document.getElementById('pdf-export-container');  
+                    const yearStart = getFinancialYearStart(yearId).toLocaleDateString('ar-YE');  
+                    const yearEnd = getFinancialYearEnd(yearId).toLocaleDateString('ar-YE');  
+                      
+                    container.innerHTML = `  
+                        <div style="direction:rtl; padding:20px">  
+                            <div style="display:flex; justifyContent:space-between; alignItems:center; borderBottom:3px solid #0f172a; paddingBottom:25px; marginBottom:35px">  
+                                <div>  
+                                    <h1 style="fontSize:32px; fontWeight:bold; margin:0; color:#0f172a">تقرير صندوق الحالات الطارئة</h1>  
+                                    <p style="fontSize:16px; color:#10b981; fontWeight:600; margin:8px 0 0">قرية محبران - محافظة إب</p>  
+                                </div>  
+                                <div style="textAlign:left">  
+                                    <p style="fontSize:14px; margin:0; color:#64748b; fontWeight:bold">السنة المالية: ${yearId}</p>  
+                                    <p style="fontSize:13px; margin:5px 0 0; color:#64748b">من ${yearStart} إلى ${yearEnd}</p>  
+                                </div>  
+                            </div>  
+                            <div style="display:grid; gridTemplateColumns:1fr 1fr 1fr; gap:20px; marginBottom:40px">  
+                                <div style="background:#ecfdf5; padding:20px; borderRadius:20px; textAlign:center; borderTop:5px solid #10b981">  
+                                    <p style="fontSize:12px; fontWeight:bold; color:#047857">إجمالي السعودي</p>  
+                                    <p style="fontSize:22px; fontWeight:900; color:#064e3b">${(totalsData?.sar || 0).toLocaleString()}</p>  
+                                </div>  
+                                <div style="background:#eff6ff; padding:20px; borderRadius:20px; textAlign:center; borderTop:5px solid #3b82f6">  
+                                    <p style="fontSize:12px; fontWeight:bold; color:#1d4ed8">إجمالي الدولار</p>  
+                                    <p style="fontSize:22px; fontWeight:900; color:#1e3a8a">${(totalsData?.usd || 0).toLocaleString()}</p>  
+                                </div>  
+                                <div style="background:#fffbeb; padding:20px; borderRadius:20px; textAlign:center; borderTop:5px solid #f59e0b">  
+                                    <p style="fontSize:12px; fontWeight:bold; color:#b45309">إجمالي اليمني</p>  
+                                    <p style="fontSize:22px; fontWeight:900; color:#78350f">${(totalsData?.yer || 0).toLocaleString()}</p>  
+                                </div>  
+                            </div>  
+                            <table style="width:100%; borderCollapse:collapse; fontSize:14px; borderRadius:15px; overflow:hidden">  
+                                <thead>  
+                                    <tr style="background:#0f172a; color:white">  
+                                        <th style="padding:15px; textAlign:right">اسم المشترك</th>  
+                                        <th style="padding:15px">المدة</th>  
+                                        <th style="padding:15px">المقرر</th>  
+                                        <th style="padding:15px">المدفوع</th>  
+                                        <th style="padding:15px">المتبقي</th>  
+                                        <th style="padding:15px">الحالة</th>  
+                                    </tr>  
+                                </thead>  
+                                <tbody>  
+                                    ${donorsList.map((d, idx) => {  
+                                        const i = parseInfo(d);  
+                                        return `  
+                                            <tr style="background:${idx % 2 === 0 ? '#ffffff' : '#f8fafc'}">  
+                                                <td style="padding:12px 15px; border:1px solid #e2e8f0; fontWeight:bold">${d.name}</td>  
+                                                <td style="padding:12px 15px; border:1px solid #e2e8f0; textAlign:center">${i.duration === '3m' ? '٣ أشهر' : i.duration === '6m' ? '٦ أشهر' : i.duration === '1y' ? 'سنة كاملة' : 'غير محدد'}</td>  
+                                                <td style="padding:12px 15px; border:1px solid #e2e8f0; textAlign:center">${i.total} ${i.curr.toUpperCase()}</td>  
+                                                <td style="padding:12px 15px; border:1px solid #e2e8f0; textAlign:center; color:#059669">${i.paid}</td>  
+                                                <td style="padding:12px 15px; border:1px solid #e2e8f0; textAlign:center; color:${i.remaining > 0 ? '#e11d48' : '#64748b'}">${i.remaining}</td>  
+                                                <td style="padding:12px 15px; border:1px solid #e2e8f0; textAlign:center">  
+                                                    <span style="padding:4px 10px; borderRadius:20px; fontSize:11px; fontWeight:bold; background:${i.progress >= 100 ? '#dcfce7' : i.progress > 0 ? '#fef3c7' : '#fee2e2'}; color:${i.progress >= 100 ? '#166534' : i.progress > 0 ? '#92400e' : '#991b1b'}">  
+                                                        ${i.progress >= 100 ? 'مكتمل' : i.progress > 0 ? 'جزئي' : 'انتظار'}  
+                                                    </span>  
+                                                </td>  
+                                            </tr>  
+                                        `;  
+                                    }).join('')}  
+                                </tbody>  
+                            </table>  
+                            <div style="marginTop:60px; borderTop:2px solid #f1f5f9; paddingTop:25px; textAlign:center">  
+                                <p style="fontSize:12px; color:#94a3b8">تقرير سنوي - تم إغلاق هذه السنة تلقائياً</p>  
+                                <p style="fontSize:12px; color:#64748b; fontWeight:bold">تصميم وتطوير: عمرو مسعد الشجاع</p>  
+                            </div>  
+                        </div>  
+                    `;  
+                      
+                    const canvas = await html2canvas(element, { scale: 3, useCORS: true, backgroundColor: "#ffffff" });  
+                    const imgData = canvas.toDataURL('image/jpeg', 1.0);  
+                    const pdf = new jspdf.jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });  
+                    const pdfWidth = pdf.internal.pageSize.getWidth();  
+                    const imgProps = pdf.getImageProperties(imgData);  
+                    const imgHeight = (imgProps.height * pdfWidth) / imgProps.width;  
+                      
+                    pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, imgHeight);  
+                    const fileName = `تقرير_صندوق_محبران_${yearId}.pdf`;  
+                    pdf.save(fileName);  
+                      
+                } catch (error) {  
+                    console.error("خطأ في PDF:", error);  
+                    alert("حدث خطأ أثناء إنشاء PDF");  
+                } finally {  
+                    setIsPdfLoading(false);  
+                }  
+            };  
+  
+            const formatUpdateDate = (ts) => {  
+                if (!ts) return "غير متوفر";  
+                return new Date(ts).toLocaleDateString('ar-YE', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });  
+            };  
+  
+            const currentRemaining = useMemo(() => {  
+                const total = parseFloat(form.totalAmount) || 0;  
+                const paid = parseFloat(form.paidAmount) || 0;  
+                return Math.max(0, total - paid);  
+            }, [form.totalAmount, form.paidAmount]);  
+  
+            if (showArchivedYears) {  
+                return (  
+                    <div className="app-container shadow-2xl">  
+                        <header className="header-gradient text-white pt-6 pb-6 px-6 rounded-b-[2.5rem]">  
+                            <button onClick={() => { setShowArchivedYears(false); setSelectedArchivedYear(null); }} className="bg-white/20 px-4 py-2 rounded-xl text-sm font-bold mb-3">← العودة للسنة الحالية</button>  
+                            <h1 className="text-xl font-bold">السنة المؤرشفة: {selectedArchivedYear}</h1>  
+                        </header>  
+                        <main className="px-5 mt-8 pb-32">  
+                            <div className="mb-6 flex gap-3">  
+                                <button onClick={() => generateArchivedYearPDF(selectedArchivedYear, archivedDonors, archivedDonors.reduce((acc, d) => {  
+                                    const info = parseInfo(d);  
+                                    acc[info.curr] = (acc[info.curr] || 0) + info.paid;  
+                                    return acc;  
+                                }, {}))} className="flex-1 bg-emerald-500 text-white py-4 rounded-2xl font-bold">  
+                                    تحميل التقرير PDF  
+                                </button>  
+                            </div>  
+                            <div className="space-y-5">  
+                                {archivedDonors.map((d, idx) => {  
+                                    const info = parseInfo(d);  
+                                    return (  
+                                        <div key={idx} className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm">  
+                                            <div className="flex justify-between items-start mb-3">  
+                                                <h3 className="font-bold text-slate-800 text-base">{d.name}</h3>  
+                                                <div className="text-left">  
+                                                    <div className="text-lg font-black text-slate-900">{info.paid.toLocaleString()}</div>  
+                                                    <div className="text-[10px] font-bold text-slate-300 uppercase">{info.curr}</div>  
+                                                </div>  
+                                            </div>  
+                                            <div className="timeline-track">  
+                                                <div className={`timeline-fill ${info.color}`} style={{width:`${info.progress}%`}}></div>  
+                                            </div>  
+                                            <div className="mt-3 text-xs text-slate-400">  
+                                                المقرر: {info.total} • المتبقي: {info.remaining}  
+                                            </div>  
+                                        </div>  
+                                    );  
+                                })}  
+                            </div>  
+                        </main>  
+                    </div>  
+                );  
+            }  
+  
+            return (  
+                <div className="app-container shadow-2xl">  
+                    <header className="header-gradient text-white pt-6 pb-6 px-6 rounded-b-[2.5rem] shadow-xl">  
+                        <div className="flex justify-between items-center">  
+                            <div>  
+                                <h1 className="text-base font-bold text-white">صندوق الحالات الطارئة</h1>  
+                                <p className="text-[11px] text-emerald-400 font-medium">قرية محبران</p>  
+                                <div className="text-[9px] text-white/60 mt-2">  
+                                    السنة: {currentYearId}  
+                                    {yearStatus.endDate && !yearStatus.isClosed && (  
+                                        <span className="mr-2">| تنتهي: {yearStatus.endDate.toLocaleDateString('ar-YE')}</span>  
+                                    )}  
+                                    {yearStatus.isClosed && <span className="mr-2 text-amber-400">| 📦 مؤرشفة</span>}  
+                                </div>  
+                            </div>  
+                            <div className="flex flex-col items-end">  
+                                <button onClick={() => setShowArchivedYears(true)} className="bg-amber-500/80 px-4 py-2 rounded-xl text-[10px] font-bold mb-2">  
+                                    📂 السنوات السابقة  
+                                </button>  
+                                <div className="text-[9px] opacity-70 text-left text-white/80">  
+                                    <p>إشراف: مصطفى الشجاع</p>  
+                                    <p>تطوير: عمرو مسعد الشجاع</p>  
+                                </div>  
+                            </div>  
+                        </div>  
+                    </header>  
+  
+                    <main className="px-5 mt-8 pb-32">  
+                        {yearStatus.isClosed && (  
+                            <div className="bg-amber-100 text-amber-800 p-4 rounded-2xl mb-6 text-center text-sm font-bold">  
+                                ⚠️ السنة {currentYearId} مغلقة. سيتم فتح سنة جديدة قريباً.  
+                            </div>  
+                        )}  
+                          
+                        <div className="grid grid-cols-3 gap-3 mb-8">  
+                            <div className="currency-card-sar p-4 rounded-3xl text-center shadow-sm">  
+                                <p className="text-[9px] font-bold text-emerald-700 uppercase mb-1">سعودي</p>  
+                                <p className="text-sm font-black text-emerald-900">{totals.sar.toLocaleString()}</p>  
+                            </div>  
+                            <div className="currency-card-usd p-4 rounded-3xl text-center shadow-sm">  
+                                <p className="text-[9px] font-bold text-blue-700 uppercase mb-1">دولار</p>  
+                                <p className="text-sm font-black text-blue-900">{totals.usd.toLocaleString()}</p>  
+                            </div>  
+                            <div className="currency-card-yer p-4 rounded-3xl text-center shadow-sm">  
+                                <p className="text-[9px] font-bold text-amber-700 uppercase mb-1">يمني</p>  
+                                <p className="text-sm font-black text-amber-900">{totals.yer.toLocaleString()}</p>  
+                            </div>  
+                        </div>  
+  
+                        <div className="space-y-4 mb-8">  
+                            <input className="w-full bg-white p-4 pr-12 rounded-2xl text-sm font-bold shadow-sm outline-none" placeholder="ابحث عن مشترك..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)} />  
+                            <div className="flex bg-white p-1.5 rounded-2xl gap-1 shadow-sm border">  
+                                {['all', 'paid', 'partial', 'unpaid'].map(id => (  
+                                    <button key={id} onClick={() => setFilter(id)} className={`flex-1 py-2.5 px-2 rounded-xl text-[10px] font-bold transition-all ${filter === id ? 'filter-active' : 'text-slate-400'}`}>  
+                                        {id === 'all' ? 'الكل' : id === 'paid' ? 'المكتمل' : id === 'partial' ? 'جزئي' : 'الانتظار'}  
+                                    </button>  
+                                ))}  
+                            </div>  
+                        </div>  
+  
+                        <div className="space-y-5">  
+                            {filteredList.map(d => {  
+                                const info = parseInfo(d);  
+                                return (  
+                                    <div key={d.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm relative group active:scale-[0.98] transition-transform">  
+                                        <div className="flex justify-between items-start mb-3">  
+                                            <div className="flex-1">  
+                                                <h3 className="font-bold text-slate-800 text-base mb-1">{d.name}</h3>  
+                                                <div className="text-[9px] text-slate-400">{formatUpdateDate(d.updatedAt)}</div>  
+                                            </div>  
+                                            <div className="text-left">  
+                                                <div className="text-lg font-black text-slate-900">{info.paid.toLocaleString()}</div>  
+                                                <div className="text-[10px] font-bold text-slate-300 uppercase">{info.curr}</div>  
+                                            </div>  
+                                        </div>  
+                                        <div className="timeline-track">  
+                                            <div className={`timeline-fill ${info.color}`} style={{width:`${info.progress}%`}}></div>  
+                                        </div>  
+                                          
+                                        {!yearStatus.isClosed && (  
+                                            <div className="absolute inset-0 bg-white/95 rounded-[2.5rem] flex items-center justify-center gap-10 opacity-0 group-hover:opacity-100 transition-opacity z-10">  
+                                                <button onClick={() => { setEditId(d.id); setForm({ name: d.name, totalAmount: info.total, paidAmount: info.paid, currency: info.curr, duration: info.duration, isPaidStatus: info.progress >= 100 }); setIsModalOpen(true); }} className="p-3 bg-blue-50 text-blue-600 rounded-2xl font-bold">تعديل</button>  
+                                                <button onClick={async () => { if(confirm("حذف؟")) await db.collection('financialYears').doc(currentYearId).collection('donors').doc(d.id).delete(); }} className="p-3 bg-rose-50 text-rose-600 rounded-2xl font-bold">حذف</button>  
+                                            </div>  
+                                        )}  
+                                    </div>  
+                                );  
+                            })}  
+                        </div>  
+                    </main>  
+  
+                    {!yearStatus.isClosed && (  
+                        <div className="fixed bottom-0 left-0 right-0 p-6 z-40 bg-gradient-to-t from-slate-100 to-transparent pointer-events-none">  
+                            <div className="max-w-[480px] mx-auto pointer-events-auto">  
+                                <button onClick={() => setIsModalOpen(true)} className="w-full bg-slate-900 text-white py-5 rounded-[2rem] font-bold shadow-2xl active:scale-95 transition-all">  
+                                    إضافة مشترك جديد  
+                                </button>  
+                            </div>  
+                        </div>  
+                    )}  
+  
+                    {isModalOpen && (  
+                        <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4">  
+                            <div className="absolute inset-0 bg-slate-900/70 backdrop-blur-md" onClick={closeModal}></div>  
+                            <div className="relative bg-white w-full max-w-md rounded-[3rem] p-8 overflow-y-auto max-h-[90vh] shadow-2xl">  
+                                <div className="flex justify-between items-center mb-6">  
+                                    <h2 className="text-xl font-black text-slate-800">{editId ? 'تعديل البيانات' : 'إضافة مشترك'}</h2>  
+                                    <button onClick={closeModal} className="p-2 bg-slate-50 rounded-full text-slate-400">×</button>  
+                                </div>  
+                                <form onSubmit={handleSave} className="space-y-6">  
+                                    <input required placeholder="الاسم الرباعي..." className="w-full bg-slate-50 p-5 rounded-2xl text-sm font-bold outline-none ring-slate-200 focus:ring-2" value={form.name} onChange={e=>setForm({...form, name:e.target.value})} />  
+                                      
+                                    <div className="grid grid-cols-2 gap-4">  
+                                        <div className="space-y-2">  
+                                            <label className="text-[10px] font-bold text-slate-400 mr-2 uppercase">المبلغ المقرر</label>  
+                                            <input required type="number" className="w-full bg-slate-50 p-5 rounded-2xl text-sm font-bold outline-none" value={form.totalAmount} onChange={e=>setForm({...form, totalAmount: e.target.value})} />  
+                                        </div>  
+                                        <div className="space-y-2">  
+                                            <label className="text-[10px] font-bold text-slate-400 mr-2 uppercase">العملة</label>  
+                                            <select className="w-full bg-slate-50 p-5 rounded-2xl text-sm font-bold outline-none" value={form.currency} onChange={e=>setForm({...form, currency:e.target.value})}>  
+                                                <option value="sar">ريال سعودي</option>  
+                                                <option value="usd">دولار أمريكي</option>  
+                                                <option value="yer">ريال يمني</option>  
+                                            </select>  
+                                        </div>  
+                                    </div>  
+  
+                                    <div className="space-y-2">  
+                                        <label className="text-[10px] font-bold text-slate-400 mr-2 uppercase">مدة الاشتراك</label>  
+                                        <div className="flex bg-slate-50 p-1.5 rounded-2xl gap-1">  
+                                            {['3m', '6m', '1y', 'none'].map(d => (  
+                                                <button key={d} type="button" onClick={() => setForm({...form, duration: d})} className={`flex-1 py-3 rounded-xl text-[9px] font-bold transition-all ${form.duration === d ? 'bg-white shadow-sm text-slate-900' : 'text-slate-400'}`}>  
+                                                    {d === '3m' ? '٣ أشهر' : d === '6m' ? '٦ أشهر' : d === '1y' ? 'سنة' : 'أخرى'}  
+                                                </button>  
+                                            ))}  
+                                        </div>  
+                                    </div>  
+  
+                                    <div className="space-y-2">  
+                                        <label className="text-[10px] font-bold text-slate-400 mr-2 uppercase">حالة السداد</label>  
+                                        <div className="flex gap-2">  
+                                            <button type="button" onClick={() => setForm({...form, isPaidStatus: true, paidAmount: form.totalAmount})} className={`flex-1 py-4 rounded-2xl text-xs font-bold transition-all ${form.isPaidStatus ? 'bg-emerald-500 text-white' : 'bg-slate-50 text-slate-400'}`}>مكتمل</button>  
+                                            <button type="button" onClick={() => setForm({...form, isPaidStatus: false})} className={`flex-1 py-4 rounded-2xl text-xs font-bold transition-all ${!form.isPaidStatus ? 'bg-amber-500 text-white' : 'bg-slate-50 text-slate-400'}`}>جزئي / انتظار</button>  
+                                        </div>  
+                                    </div>  
+  
+                                    {!form.isPaidStatus && (  
+                                        <div className="grid grid-cols-2 gap-4 items-end">  
+                                            <div className="space-y-2">  
+                                                <label className="text-[10px] font-bold text-slate-400 mr-2 uppercase">المبلغ المدفوع</label>  
+                                                <input required type="number" className="w-full bg-white border-2 border-slate-100 p-5 rounded-2xl text-sm font-bold outline-none" value={form.paidAmount} onChange={e=>setForm({...form, paidAmount:e.target.value})} />  
+                                            </div>  
+                                            <div className="bg-rose-50 p-5 rounded-2xl text-center">  
+                                                <p className="text-[9px] font-bold text-rose-400 uppercase mb-1">المتبقي</p>  
+                                                <p className="text-sm font-black text-rose-600">{currentRemaining.toLocaleString()}</p>  
+                                            </div>  
+                                        </div>  
+                                    )}  
+  
+                                    <button className="w-full bg-slate-900 text-white py-5 rounded-2xl font-black text-sm shadow-xl active:scale-95 transition-all">حفظ البيانات</button>  
+                                </form>  
+                            </div>  
+                        </div>  
+                    )}  
+  
+                    <div id="pdf-export-container"></div>  
+                </div>  
+            );  
+        }  
+  
+        const root = ReactDOM.createRoot(document.getElementById('root'));  
+        root.render(<App />);  
+    </script>  
+</body>  
+</html>  
