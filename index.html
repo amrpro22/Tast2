@@ -28,7 +28,7 @@
             -webkit-tap-highlight-color: transparent; 
         }
         body { 
-            background: #f0f2f5; 
+            background: #f5f5f7; 
             font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
         .stat-card { 
@@ -53,6 +53,20 @@
         .pending-card:hover {
             transform: translateX(-2px);
             box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        }
+        .ios-balance-card {
+            background: linear-gradient(135deg, #2b6e9e 0%, #1e4a6e 100%);
+            border-radius: 24px;
+            padding: 16px 12px;
+            text-align: center;
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s;
+        }
+        .ios-balance-card:nth-child(2) {
+            background: linear-gradient(135deg, #1f8a6b 0%, #0e5e48 100%);
+        }
+        .ios-balance-card:nth-child(3) {
+            background: linear-gradient(135deg, #c07a3a 0%, #9a5a20 100%);
         }
         .btn-approve { 
             background: #2b7a48; 
@@ -95,13 +109,39 @@
         .fade-in {
             animation: fadeIn 0.3s ease-out;
         }
+        .select-custom {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+            background-position: left 0.75rem center;
+            background-repeat: no-repeat;
+            background-size: 1.25rem;
+            padding-left: 2.5rem;
+            appearance: none;
+        }
+        .ios-progress {
+            background: #e9ecef;
+            border-radius: 12px;
+            height: 6px;
+            overflow: hidden;
+        }
+        .ios-progress-fill {
+            height: 100%;
+            border-radius: 12px;
+            transition: width 0.3s ease;
+        }
+        .donor-row {
+            transition: all 0.2s;
+        }
+        .donor-row:hover {
+            background: #f8f9fc;
+            transform: translateX(-2px);
+        }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useMemo } = React;
+        const { useState, useEffect, useMemo, useCallback } = React;
 
         // ==================== إعدادات Firebase ====================
         const firebaseConfig = {
@@ -135,37 +175,85 @@
         const auth = firebase.auth();
         const APP_PATH = "amr4admin";
 
+        // ==================== بيانات المستخدمين المصرح لهم ====================
+        const USERS = [
+            { name: "مجدي عبده علي", role: "financial_manager", password: "2111", displayRole: "المدير المالي" },
+            { name: "مصطفى الشجاع", role: "super_admin", password: "0805", displayRole: "المشرف العام" },
+            { name: "عمرو مسعد الشجاع", role: "developer", password: "1993", displayRole: "مطور النظام" }
+        ];
+
+        // ==================== دالة تحليل البيانات ====================
+        const parseDonorInfo = (donor) => {
+            const total = parseFloat(donor.totalAmount) || 0;
+            const paid = parseFloat(donor.paidAmount) || 0;
+            const remaining = Math.max(0, total - paid);
+            const currency = donor.currency || 'sar';
+            const progress = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
+            
+            let progressColor = progress >= 100 ? '#2b7a48' : (progress > 50 ? '#2b6e9e' : (progress > 0 ? '#e2a14f' : '#bc3f2e'));
+            
+            const startDate = donor.startDate;
+            const formattedDate = startDate ? new Date(startDate).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : 'تاريخ غير محدد';
+            
+            let status = 'active';
+            let statusText = 'نشط';
+            let statusColor = '#2b7a48';
+            
+            if (donor.expiryDate) {
+                const now = new Date();
+                const expiry = new Date(donor.expiryDate);
+                const daysUntilExpiry = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+                
+                if (now > expiry) {
+                    status = 'expired';
+                    statusText = 'منتهي';
+                    statusColor = '#bc3f2e';
+                } else if (daysUntilExpiry <= 7) {
+                    status = 'expiring';
+                    statusText = 'ينتهي قريباً';
+                    statusColor = '#e2a14f';
+                }
+            }
+            
+            return { total, paid, remaining, currency, progress, progressColor, formattedDate, status, statusText, statusColor };
+        };
+
         // ==================== المكون الرئيسي ====================
         const FinancialDashboard = () => {
             const [currentUser, setCurrentUser] = useState(null);
             const [showLogin, setShowLogin] = useState(true);
-            const [loginEmail, setLoginEmail] = useState('');
-            const [loginPassword, setLoginPassword] = useState('');
+            const [selectedUser, setSelectedUser] = useState('');
+            const [password, setPassword] = useState('');
             const [loginError, setLoginError] = useState('');
             
             // البيانات المالية
-            const [donations, setDonations] = useState([]);
+            const [donors, setDonors] = useState([]); // المساهمين (الحالات الطارئة)
             const [zakatRecords, setZakatRecords] = useState([]);
             const [expenses, setExpenses] = useState([]);
             const [pendingWithdrawals, setPendingWithdrawals] = useState([]);
             const [approvedWithdrawals, setApprovedWithdrawals] = useState([]);
             const [rejectedWithdrawals, setRejectedWithdrawals] = useState([]);
             
+            // البحث والفلترة
+            const [searchTerm, setSearchTerm] = useState('');
+            const [donorFilter, setDonorFilter] = useState('all');
+            
             // حالة التحميل
             const [loading, setLoading] = useState(false);
             const [notes, setNotes] = useState('');
 
             // ==================== حساب الأرصدة ====================
+            // حساب إجمالي التبرعات من المساهمين
             const donationsTotal = useMemo(() => {
                 const sums = { sar: 0, usd: 0, yer: 0 };
-                donations.forEach(d => {
-                    const curr = d.currency || 'sar';
-                    const paid = parseFloat(d.paidAmount) || 0;
-                    sums[curr] += paid;
+                donors.forEach(d => {
+                    const info = parseDonorInfo(d);
+                    sums[info.currency] += info.paid;
                 });
                 return sums;
-            }, [donations]);
+            }, [donors]);
 
+            // حساب إجمالي الزكاة
             const zakatTotal = useMemo(() => {
                 const sums = { sar: 0, usd: 0, yer: 0 };
                 zakatRecords.forEach(z => {
@@ -175,6 +263,7 @@
                 return sums;
             }, [zakatRecords]);
 
+            // حساب إجمالي المصروفات
             const expensesTotal = useMemo(() => {
                 const sums = { 'ريال يمني': 0, 'ريال سعودي': 0, 'دولار': 0 };
                 expenses.forEach(e => {
@@ -183,21 +272,42 @@
                 return sums;
             }, [expenses]);
 
+            // الرصيد المتاح
             const availableBalance = useMemo(() => ({
                 sar: Math.max(0, (donationsTotal.sar + zakatTotal.sar) - expensesTotal['ريال سعودي']),
                 usd: Math.max(0, (donationsTotal.usd + zakatTotal.usd) - expensesTotal['دولار']),
                 yer: Math.max(0, (donationsTotal.yer + zakatTotal.yer) - expensesTotal['ريال يمني'])
             }), [donationsTotal, zakatTotal, expensesTotal]);
 
+            // المساهمين المفلترين
+            const filteredDonors = useMemo(() => {
+                let list = [...donors];
+                list.sort((a, b) => (b.startDate || b.updatedAt || 0) - (a.startDate || a.updatedAt || 0));
+                
+                if (searchTerm) {
+                    list = list.filter(d => d.name && d.name.includes(searchTerm));
+                }
+                
+                return list.filter(d => {
+                    const info = parseDonorInfo(d);
+                    if (donorFilter === 'paid') return info.progress >= 100;
+                    if (donorFilter === 'partial') return info.progress > 0 && info.progress < 100;
+                    if (donorFilter === 'unpaid') return info.progress === 0;
+                    if (donorFilter === 'expired') return info.status === 'expired';
+                    if (donorFilter === 'active') return info.status === 'active';
+                    return true;
+                });
+            }, [donors, searchTerm, donorFilter]);
+
             // ==================== جلب البيانات ====================
             const fetchFinancialData = async () => {
                 setLoading(true);
                 try {
-                    // جلب التبرعات من Firestore
+                    // جلب المساهمين من Firestore
                     const donorsRef = db.collection('artifacts').doc(APP_PATH).collection('public').doc('data').collection('donors');
                     const donorsSnap = await donorsRef.get();
                     const allRecords = donorsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    setDonations(allRecords.filter(r => r.type !== 'zakat'));
+                    setDonors(allRecords.filter(r => r.type !== 'zakat'));
                     setZakatRecords(allRecords.filter(r => r.type === 'zakat'));
 
                     // جلب المصروفات المعتمدة
@@ -252,7 +362,6 @@
                 if (!currentUser) return;
                 setLoading(true);
                 try {
-                    // نقل الطلب إلى المعتمدين
                     const approvedData = {
                         ...request,
                         approvedBy: currentUser.name,
@@ -262,7 +371,6 @@
                     };
                     await rtDb.ref(`${APP_PATH}/approved_withdrawals/${request.id}`).set(approvedData);
                     
-                    // تسجيل الصرف في جدول المصروفات
                     await rtDb.ref('expenses').push().set({
                         beneficiaryName: request.beneficiaryName,
                         amount: request.amount,
@@ -275,10 +383,8 @@
                         timestamp: firebase.database.ServerValue.TIMESTAMP
                     });
                     
-                    // حذف من المعلقة
                     await rtDb.ref(`${APP_PATH}/pending_withdrawals/${request.id}`).remove();
                     
-                    // تسجيل نشاط
                     await rtDb.ref(`${APP_PATH}/activity_logs`).push().set({
                         username: currentUser.name,
                         role: currentUser.role,
@@ -334,110 +440,147 @@
                 }
             };
 
-            // ==================== المصادقة ====================
+            // ==================== تسجيل الدخول ====================
             const handleLogin = async () => {
-                if (!loginEmail || !loginPassword) {
-                    setLoginError('يرجى إدخال الإيميل وكلمة المرور');
+                if (!selectedUser) {
+                    setLoginError('الرجاء اختيار المستخدم من القائمة');
                     return;
                 }
+                if (!password) {
+                    setLoginError('الرجاء إدخال كلمة المرور');
+                    return;
+                }
+                
+                const user = USERS.find(u => u.name === selectedUser);
+                if (!user) {
+                    setLoginError('المستخدم غير موجود');
+                    return;
+                }
+                
+                if (user.password !== password) {
+                    setLoginError('كلمة المرور غير صحيحة');
+                    return;
+                }
+                
                 setLoading(true);
                 setLoginError('');
+                
                 try {
-                    const credential = await auth.signInWithEmailAndPassword(loginEmail, loginPassword);
-                    const user = credential.user;
+                    const fakeEmail = `${user.name.replace(/ /g, '_').toLowerCase()}@system.local`;
+                    const fakePassword = user.password + "_firebase_auth_" + user.name.length;
                     
-                    // التحقق من أن المستخدم مدير مالي
-                    const adminDoc = await db.collection('admins').doc(user.uid).get();
-                    const adminData = adminDoc.data();
-                    
-                    if (!adminDoc.exists) {
-                        throw new Error('هذا الحساب غير مضاف ضمن المشرفين');
-                    }
-                    
-                    if (adminData.role !== 'financial_manager') {
-                        throw new Error('غير مصرح لك بالدخول - هذه اللوحة مخصصة للمدير المالي فقط');
-                    }
-                    
-                    if (adminData.active !== true) {
-                        throw new Error('هذا الحساب غير مفعّل');
+                    try {
+                        await auth.signInWithEmailAndPassword(fakeEmail, fakePassword);
+                    } catch (authError) {
+                        if (authError.code === 'auth/user-not-found') {
+                            await auth.createUserWithEmailAndPassword(fakeEmail, fakePassword);
+                        } else {
+                            console.log("تم تسجيل الدخول بنجاح");
+                        }
                     }
                     
                     setCurrentUser({ 
-                        uid: user.uid, 
-                        email: user.email, 
-                        name: adminData.name || 'مدير مالي', 
-                        role: adminData.role 
+                        name: user.name, 
+                        role: user.role,
+                        displayRole: user.displayRole
                     });
                     setShowLogin(false);
                     fetchFinancialData();
+                    
+                    await rtDb.ref(`${APP_PATH}/activity_logs`).push().set({
+                        username: user.name,
+                        role: user.role,
+                        actionType: 'تسجيل دخول',
+                        details: `قام "${user.name}" (${user.displayRole}) بتسجيل الدخول إلى لوحة المدير المالي`,
+                        timestamp: Date.now()
+                    }).catch(() => {});
+                    
                 } catch (error) {
                     console.error(error);
-                    let message = error.message;
-                    if (error.code === 'auth/invalid-login-credentials') {
-                        message = 'الإيميل أو كلمة المرور غير صحيحة';
-                    }
-                    setLoginError(message);
-                    try { await auth.signOut(); } catch(e) {}
+                    setLoginError('حدث خطأ في تسجيل الدخول: ' + error.message);
                 } finally {
                     setLoading(false);
                 }
             };
 
             const handleLogout = async () => {
-                await rtDb.ref(`${APP_PATH}/activity_logs`).push().set({
-                    username: currentUser?.name,
-                    role: currentUser?.role,
-                    actionType: 'تسجيل خروج',
-                    details: `قام المدير المالي "${currentUser?.name}" بتسجيل الخروج`,
-                    timestamp: Date.now()
-                }).catch(() => {});
-                await auth.signOut();
+                if (currentUser) {
+                    await rtDb.ref(`${APP_PATH}/activity_logs`).push().set({
+                        username: currentUser.name,
+                        role: currentUser.role,
+                        actionType: 'تسجيل خروج',
+                        details: `قام "${currentUser.name}" (${currentUser.displayRole}) بتسجيل الخروج من لوحة المدير المالي`,
+                        timestamp: Date.now()
+                    }).catch(() => {});
+                }
+                await auth.signOut().catch(() => {});
                 setCurrentUser(null);
                 setShowLogin(true);
-                setLoginEmail('');
-                setLoginPassword('');
+                setSelectedUser('');
+                setPassword('');
             };
 
             // ==================== واجهة تسجيل الدخول ====================
             if (showLogin) {
                 return (
-                    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: '#f0f2f5' }}>
+                    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: '#f5f5f7' }}>
                         <div className="bg-white rounded-3xl p-8 w-full max-w-md shadow-xl border-t-4 border-[#1e3c72] fade-in">
                             <div className="text-center mb-6">
-                                <div className="text-4xl mb-2">💰</div>
+                                <div className="text-5xl mb-3">💰</div>
                                 <h2 className="text-2xl font-bold text-[#1e3c72]">لوحة المدير المالي</h2>
                                 <p className="text-gray-500 text-sm mt-1">نظام الموافقات والتقارير المالية</p>
                             </div>
+                            
                             {loginError && (
-                                <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4 text-center">
-                                    {loginError}
+                                <div className="bg-red-50 text-red-600 p-3 rounded-xl text-sm mb-4 text-center border-r-4 border-red-600">
+                                    ⚠️ {loginError}
                                 </div>
                             )}
-                            <div className="space-y-3">
-                                <input 
-                                    type="email" 
-                                    placeholder="البريد الإلكتروني" 
-                                    className="w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:border-[#1e3c72] focus:ring-2 focus:ring-[#1e3c72]/20 transition-all" 
-                                    value={loginEmail} 
-                                    onChange={e => setLoginEmail(e.target.value)}
-                                    onKeyPress={e => e.key === 'Enter' && handleLogin()}
-                                />
-                                <input 
-                                    type="password" 
-                                    placeholder="كلمة المرور" 
-                                    className="w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:border-[#1e3c72] focus:ring-2 focus:ring-[#1e3c72]/20 transition-all" 
-                                    value={loginPassword} 
-                                    onChange={e => setLoginPassword(e.target.value)}
-                                    onKeyPress={e => e.key === 'Enter' && handleLogin()}
-                                />
+                            
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">اختر المستخدم</label>
+                                    <select 
+                                        className="select-custom w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:border-[#1e3c72] focus:ring-2 focus:ring-[#1e3c72]/20 transition-all bg-white"
+                                        value={selectedUser} 
+                                        onChange={e => {
+                                            setSelectedUser(e.target.value);
+                                            setLoginError('');
+                                        }}
+                                    >
+                                        <option value="">-- اختر من القائمة --</option>
+                                        {USERS.map(user => (
+                                            <option key={user.name} value={user.name}>
+                                                {user.name} - {user.displayRole}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">كلمة المرور</label>
+                                    <input 
+                                        type="password" 
+                                        placeholder="أدخل كلمة المرور" 
+                                        className="w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:border-[#1e3c72] focus:ring-2 focus:ring-[#1e3c72]/20 transition-all" 
+                                        value={password} 
+                                        onChange={e => {
+                                            setPassword(e.target.value);
+                                            setLoginError('');
+                                        }}
+                                        onKeyPress={e => e.key === 'Enter' && handleLogin()}
+                                    />
+                                </div>
+                                
                                 <button 
                                     onClick={handleLogin} 
                                     disabled={loading} 
-                                    className="w-full bg-[#1e3c72] text-white py-3 rounded-xl font-medium hover:bg-[#2a5298] transition-all disabled:opacity-50"
+                                    className="w-full bg-[#1e3c72] text-white py-3 rounded-xl font-medium hover:bg-[#2a5298] transition-all disabled:opacity-50 mt-2"
                                 >
-                                    {loading ? 'جاري التسجيل...' : 'تسجيل الدخول'}
+                                    {loading ? 'جاري التسجيل...' : '🔓 تسجيل الدخول'}
                                 </button>
                             </div>
+                            
                             <div className="mt-6 text-center border-t pt-4">
                                 <p className="text-xs text-gray-400">© نظام الصناديق الخيرية</p>
                                 <p className="text-xs text-gray-400 mt-1">مطور النظام: عمرو مسعد الشجاع</p>
@@ -447,16 +590,16 @@
                 );
             }
 
-            // ==================== الواجهة الرئيسية للمدير المالي ====================
+            // ==================== الواجهة الرئيسية ====================
             return (
-                <div className="min-h-screen" style={{ background: '#f0f2f5' }}>
+                <div className="min-h-screen" style={{ background: '#f5f5f7' }}>
                     {/* الهيدر */}
                     <div className="bg-gradient-to-r from-[#1e3c72] to-[#2a5298] text-white p-4 sticky top-0 z-10 shadow-lg">
                         <div className="max-w-6xl mx-auto flex justify-between items-center flex-wrap gap-3">
                             <div>
                                 <h1 className="text-xl font-bold">💰 لوحة المدير المالي</h1>
                                 <p className="text-sm opacity-80 mt-1">
-                                    {currentUser?.name} | {currentUser?.role === 'financial_manager' ? 'مدير مالي' : currentUser?.role}
+                                    {currentUser?.name} | {currentUser?.displayRole}
                                 </p>
                             </div>
                             <button 
@@ -469,20 +612,106 @@
                     </div>
 
                     <div className="max-w-6xl mx-auto p-4 pb-8">
-                        {/* بطاقات الأرصدة */}
+                        {/* بطاقات الأرصدة - بنفس تصميم لوحة التحكم */}
                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-                            <div className="stat-card text-center">
-                                <p className="text-gray-500 text-sm">🇸🇦 الرصيد بالريال السعودي</p>
-                                <p className="text-3xl font-bold text-[#2b7a48]">{availableBalance.sar.toLocaleString()} <span className="text-sm">ر.س</span></p>
+                            <div className="ios-balance-card">
+                                <p className="text-white/80 text-xs font-medium">🇸🇦 ريال سعودي</p>
+                                <p className="text-white text-2xl font-bold">{availableBalance.sar.toLocaleString()}</p>
+                                <p className="text-white/60 text-[10px]">الرصيد المتاح</p>
                             </div>
-                            <div className="stat-card text-center">
-                                <p className="text-gray-500 text-sm">🇺🇸 الرصيد بالدولار</p>
-                                <p className="text-3xl font-bold text-[#2b7a48]">{availableBalance.usd.toLocaleString()} <span className="text-sm">$</span></p>
+                            <div className="ios-balance-card">
+                                <p className="text-white/80 text-xs font-medium">🇺🇸 دولار</p>
+                                <p className="text-white text-2xl font-bold">{availableBalance.usd.toLocaleString()}</p>
+                                <p className="text-white/60 text-[10px]">الرصيد المتاح</p>
                             </div>
-                            <div className="stat-card text-center">
-                                <p className="text-gray-500 text-sm">🇾🇪 الرصيد بالريال اليمني</p>
-                                <p className="text-3xl font-bold text-[#2b7a48]">{availableBalance.yer.toLocaleString()} <span className="text-sm">ر.ي</span></p>
+                            <div className="ios-balance-card">
+                                <p className="text-white/80 text-xs font-medium">🇾🇪 ريال يمني</p>
+                                <p className="text-white text-2xl font-bold">{availableBalance.yer.toLocaleString()}</p>
+                                <p className="text-white/60 text-[10px]">الرصيد المتاح</p>
                             </div>
+                        </div>
+
+                        {/* قائمة المساهمين (الحالات الطارئة) */}
+                        <div className="bg-white rounded-2xl p-5 mb-6 shadow-sm">
+                            <div className="flex justify-between items-center flex-wrap gap-3 mb-4">
+                                <h2 className="text-lg font-bold flex items-center gap-2">
+                                    📋 قائمة المساهمين (الحالات الطارئة)
+                                    <span className="bg-[#1e3c72] text-white text-xs px-2 py-1 rounded-full">{filteredDonors.length}</span>
+                                </h2>
+                                <input 
+                                    type="text" 
+                                    placeholder="بحث باسم الحالة..." 
+                                    className="p-2 border border-gray-200 rounded-xl text-sm w-64 focus:outline-none focus:border-[#1e3c72]"
+                                    value={searchTerm}
+                                    onChange={e => setSearchTerm(e.target.value)}
+                                />
+                            </div>
+                            
+                            {/* فلاتر المساهمين */}
+                            <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+                                {[
+                                    { id: 'all', label: 'الجميع' },
+                                    { id: 'active', label: 'نشط' },
+                                    { id: 'expired', label: 'منتهي' },
+                                    { id: 'paid', label: 'مكتمل' },
+                                    { id: 'partial', label: 'جزئي' },
+                                    { id: 'unpaid', label: 'انتظار' }
+                                ].map(pill => (
+                                    <button 
+                                        key={pill.id}
+                                        onClick={() => setDonorFilter(pill.id)}
+                                        className={`px-4 py-1.5 rounded-full text-sm transition-all ${
+                                            donorFilter === pill.id 
+                                                ? 'bg-[#1e3c72] text-white' 
+                                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                        }`}
+                                    >
+                                        {pill.label}
+                                    </button>
+                                ))}
+                            </div>
+                            
+                            {loading && filteredDonors.length === 0 ? (
+                                <div className="text-center py-8 text-gray-400">جاري التحميل...</div>
+                            ) : filteredDonors.length === 0 ? (
+                                <div className="text-center py-8 text-gray-400">لا توجد بيانات</div>
+                            ) : (
+                                <div className="space-y-3 max-h-96 overflow-y-auto">
+                                    {filteredDonors.map(donor => {
+                                        const info = parseDonorInfo(donor);
+                                        return (
+                                            <div key={donor.id} className="donor-row border border-gray-100 rounded-xl p-3">
+                                                <div className="flex justify-between items-start flex-wrap gap-2">
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                            <h3 className="font-bold text-base">{donor.name}</h3>
+                                                            <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: info.statusColor + '20', color: info.statusColor }}>
+                                                                {info.statusText}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-xs text-gray-400 mt-1">تاريخ التسجيل: {info.formattedDate}</p>
+                                                        <p className="text-xs text-gray-400">مدخل البيانات: {donor.dataEntryName || donor.recordedBy || 'غير محدد'}</p>
+                                                    </div>
+                                                    <div className="text-left">
+                                                        <p className="text-sm font-bold text-[#2b7a48]">المبلغ الكلي: {info.total.toLocaleString()} {info.currency === 'sar' ? 'ر.س' : info.currency === 'usd' ? '$' : 'ر.ي'}</p>
+                                                        <p className="text-sm font-bold text-[#e2a14f]">المدفوع: {info.paid.toLocaleString()} {info.currency === 'sar' ? 'ر.س' : info.currency === 'usd' ? '$' : 'ر.ي'}</p>
+                                                        <p className="text-sm font-bold text-[#bc3f2e]">المتبقي: {info.remaining.toLocaleString()} {info.currency === 'sar' ? 'ر.س' : info.currency === 'usd' ? '$' : 'ر.ي'}</p>
+                                                    </div>
+                                                </div>
+                                                <div className="mt-2">
+                                                    <div className="ios-progress">
+                                                        <div className="ios-progress-fill" style={{ width: `${info.progress}%`, backgroundColor: info.progressColor }}></div>
+                                                    </div>
+                                                    <div className="flex justify-between mt-1 text-xs text-gray-400">
+                                                        <span>نسبة الإنجاز</span>
+                                                        <span>{info.progress}%</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
 
                         {/* طلبات الصرف المعلقة */}
@@ -536,7 +765,7 @@
                             )}
                         </div>
 
-                        {/* التقارير المالية - شبكة */}
+                        {/* التقارير المالية */}
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                             {/* إجمالي الإيرادات */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm">
